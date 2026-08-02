@@ -22,6 +22,10 @@ func handle(args []string) string {
 		return eb(args[1], true)
 	case "ECHO":
 		return eb(args[1], true)
+	case "COMMAND":
+		if len(args) > 1 { 
+			if args[1] == "DOCS" { return es("OK") } 
+		}
 	}
 	return ee(fmt.Sprintf("ERR unknown command '%s'", args[0]))
 }
