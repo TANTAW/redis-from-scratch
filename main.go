@@ -11,7 +11,7 @@ import (
 
 
 // store is a simple in-memory key-value store.
-var store = map[string]string{}
+var store = make(map[string]string)
 
 // ---- RESP serializers -------------------------------------------------
 const nullBulk = "$-1\r\n"
@@ -140,7 +140,7 @@ func parseRequest(r *bufio.Reader) ([]string, error) {
 	
 	args := make([]string, 0, arraySize)
 	
-	for range arraySize {
+	for i := 0; i < arraySize; i++ {
 		// Read the $len\r\n line
 		lenLine, err := r.ReadString('\n')
 		if err != nil {
