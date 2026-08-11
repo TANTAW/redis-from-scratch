@@ -31,8 +31,33 @@ func handle(args []string) string {
 		return es("OK")
 	case "SET":
 		if len(args) < 3 { return ee("ERR wrong number of arguments for 'SET' command") }
-		store[args[1]] = args[2]
-		return es("OK")
+		key, val := args[1], args[2]
+		flags := args[3:]
+		nx, xx := false, false
+		for _, flag := range flags {
+			switch strings.ToUpper(flag) {
+			case "NX": nx = true
+			case "XX": xx = true
+			default: return ee(fmt.Sprintf("ERR unknown option '%s'", flag))
+			}
+		}
+		if nx && xx { return ee("ERR NX and XX options at the same time are not compatible") }
+		if nx {
+			if _, exists := store[key]; exists { return eb("", false) }
+		}
+		if xx {
+			if _, exists := store[key]; !exists { return eb("", false) }
+		}
+		store[key] = val
+		return es("OK")	
+		// TODO: Parse optional flags starting at args[3:]
+		// Look for NX or XX (case-insensitive)
+		// nx=true means only set if key does NOT exist
+		// xx=true means only set if key DOES exist
+		// If NX set and key exists -> return eb("", false)
+		// If XX set and key doesn't exist -> return eb("", false)
+		// Otherwise store[key] = val and return es("OK")
+		
 	case "GET":
 		v, ok := store[args[1]]
 		return eb(v, ok)
