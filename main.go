@@ -15,6 +15,7 @@ func eb(s string, ok bool) string {
 }
 func es(s string) string { return fmt.Sprintf("+%s\r\n", s) }
 func ee(m string) string { return fmt.Sprintf("-%s\r\n", m) }
+func ei(n int) string    { return fmt.Sprintf(":%d\r\n", n) }
 
 func handle(args []string) string {
 	cmd := strings.ToUpper(args[0])
@@ -29,16 +30,14 @@ func handle(args []string) string {
 	case "COMMAND":
 		return es("OK")
 	case "SET":
-		key, value := args[1], args[2]
-        store[key] = value
-        return es("OK")
+		if len(args) < 3 { return ee("ERR wrong number of arguments for 'SET' command") }
+		store[args[1]] = args[2]
+		return es("OK")
 	case "GET":
-		key := args[1]
-		if _, exists := store[key]; !exists {
-			return eb("", false)
-		}
-		return eb(store[key], true)
-		
+		v, ok := store[args[1]]
+		return eb(v, ok)
+	case "DBSIZE":
+		return ei(len(store))
 	}
 	return ee(fmt.Sprintf("ERR unknown command '%s'", args[0]))
 }
