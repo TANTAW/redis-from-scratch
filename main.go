@@ -3,98 +3,45 @@ package main
 import (
 	"bufio"
 	"fmt"
-	"io"
 	"os"
-	"strconv"
 	"strings"
 )
 
+var store = map[string]string{}
 
-// store is a simple in-memory key-value store.
-var store = make(map[string]string)
-
-// ---- RESP serializers -------------------------------------------------
-const nullBulk = "$-1\r\n"
-
-func simpleString(s string) string { return "+" + s + "\r\n" }
-func errorReply(m string) string   { return "-" + m + "\r\n" }
-func integer(n int) string         { return fmt.Sprintf(":%d\r\n", n) }
-
-func bulkString(s string) string {
+func eb(s string, ok bool) string {
+	if !ok { return "$-1\r\n" }
 	return fmt.Sprintf("$%d\r\n%s\r\n", len(s), s)
 }
+func es(s string) string { return fmt.Sprintf("+%s\r\n", s) }
+func ee(m string) string { return fmt.Sprintf("-%s\r\n", m) }
 
-// ---- Handlers ---------------------------------------------------------
-
-// handlerFunc receives ONLY the arguments. args[0] is the first argument,
-// not the command name. The dispatcher strips and normalizes the name.
-type handlerFunc func(args []string) string
-
-type command struct {
-	fn       handlerFunc
-	min, max int
-}
-
-
-func cmdPing(args []string) string {
-	if len(args) > 0 {
-		return bulkString(args[0])
+func handle(args []string) string {
+	cmd := strings.ToUpper(args[0])
+	switch cmd {
+	case "PING":
+		if len(args) > 2 { return ee("ERR wrong number of arguments for 'PING' command") }
+		if len(args) == 1 { return es("PONG") }
+		return eb(args[1], true)
+	case "ECHO":
+		if len(args) != 2 { return ee("ERR wrong number of arguments for 'ECHO' command") }
+		return eb(args[1], true)
+	case "COMMAND":
+		return es("OK")
+	case "SET":
+		key, value := args[1], args[2]
+        store[key] = value
+        return es("OK")
+	case "GET":
+		key := args[1]
+		if _, exists := store[key]; !exists {
+			return eb("", false)
+		}
+		return eb(store[key], true)
+		
 	}
-	return simpleString("PONG")
+	return ee(fmt.Sprintf("ERR unknown command '%s'", args[0]))
 }
-
-func cmdEcho(args []string) string {
-	return bulkString(args[0])
-}
-
-func cmdCommand(args []string) string {
-	return simpleString("OK")
-}
-
-func cmdSet(args []string) string {
-	key, value := args[0], args[1]
-	store[key] = value
-	return simpleString("OK")
-}
-
-func cmdGet(args []string) string {
-	key := args[0]
-	value, ok := store[key]
-	if !ok {
-		return nullBulk
-	}
-	return bulkString(value)
-}
-
-// ---- Command dispatch table -------------------------------------------
-
-var commands = map[string]command{
-	"PING": {cmdPing, 0, 1},
-	"ECHO": {cmdEcho, 1, 1},
-	"SET": {cmdSet, 2, 2},
-	"GET": {cmdGet, 1, 1},
-	"COMMAND": {cmdCommand, 0, 1},
-}
-
-// ---- Dispatch ---------------------------------------------------------
-
-func handle(parts []string) string {
-	if len(parts) == 0 {
-		return ""
-	}
-	cmd, args := strings.ToUpper(parts[0]), parts[1:]
-
-	h, ok := commands[cmd]
-	if !ok {
-		return errorReply(fmt.Sprintf("ERR unknown command '%s'", parts[0]))
-	}
-	if len(args) < h.min || len(args) > h.max {
-		return errorReply(fmt.Sprintf("ERR wrong number of arguments for '%s' command", cmd))
-	}
-	return h.fn(args)
-}
-
-// ---- Line parsing (temporary; replaced by RESP arrays later) ----------
 
 func parseArgs(line string) []string {
 	var args []string
@@ -102,84 +49,22 @@ func parseArgs(line string) []string {
 	inQ := false
 	for _, ch := range line {
 		switch {
-		case ch == '"' && !inQ:
-			inQ = true
-		case ch == '"' && inQ:
-			inQ = false
+		case ch == '"' && !inQ: inQ = true
+		case ch == '"' && inQ: inQ = false
 		case ch == ' ' && !inQ:
-			if cur.Len() > 0 {
-				args = append(args, cur.String())
-				cur.Reset()
-			}
-		default:
-			cur.WriteRune(ch)
+			if cur.Len() > 0 { args = append(args, cur.String()); cur.Reset() }
+		default: cur.WriteRune(ch)
 		}
 	}
-	if cur.Len() > 0 {
-		args = append(args, cur.String())
-	}
+	if cur.Len() > 0 { args = append(args, cur.String()) }
 	return args
 }
 
-// parseRequest reads one RESP array from r and returns its arg list.
-func parseRequest(r *bufio.Reader) ([]string, error) {
-	// Read the *N\r\n line
-	line, err := r.ReadString('\n')
-	
-	if err != nil {
-		return nil, err
-	}
-	if !strings.HasPrefix(line, "*") {
-		return nil, fmt.Errorf("expected '*', got %q", line)
-	}
-
-	arraySize, err := strconv.Atoi(strings.TrimSpace(line[1:]))
-	if err != nil {
-		return nil, fmt.Errorf("invalid array size: %v", err)
-	}
-	
-	args := make([]string, 0, arraySize)
-	
-	for i := 0; i < arraySize; i++ {
-		// Read the $len\r\n line
-		lenLine, err := r.ReadString('\n')
-		if err != nil {
-			return nil, err
-		}
-		if !strings.HasPrefix(lenLine, "$") {
-			return nil, fmt.Errorf("expected '$', got %q", lenLine)
-		}
-		
-		strLen, err := strconv.Atoi(strings.TrimSpace(lenLine[1:]))
-		if err != nil {
-			return nil, fmt.Errorf("invalid string length: %v", err)
-		}
-		
-		buf := make([]byte, strLen+2) // +2 for \r\n
-		if _, err := io.ReadFull(r, buf); err != nil {
-			return nil, err
-		}
-		
-		args = append(args, string(buf[:strLen])) // Exclude the trailing \r\n
-	}
-
-	_ = strconv.Atoi
-	_ = io.ReadFull
-	return args, nil	
-	
-}
-
-// ---- Main loop ---------------------------------------------------------
 func main() {
-	r := bufio.NewReader(os.Stdin)
-	w := bufio.NewWriter(os.Stdout)
-	defer w.Flush()
-	for {
-		args, err := parseRequest(r)
-		if err != nil {
-			return
-		}
-		w.WriteString(handle(args))
-		w.Flush()
+	sc := bufio.NewScanner(os.Stdin)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" { continue }
+		fmt.Print(handle(parseArgs(line)))
 	}
 }
