@@ -9,6 +9,13 @@ import (
 )
 
 var store = map[string]string{}
+var expiry = map[string]int64{} // key -> absolute expiry in ms (-1 = no expiry)
+var clock int64 = 0             // simulated clock in milliseconds
+
+func isExpired(key string) bool {
+	exp, ok := expiry[key]
+	return ok && exp >= 0 && clock >= exp
+}
 
 func eb(s string, ok bool) string {
 	if !ok { return "$-1\r\n" }
@@ -42,6 +49,7 @@ func setCmd(args []string) string {
 	if nx && exists { return eb("", false) }
 	if xx && !exists { return eb("", false) }
 	store[key] = val
+	expiry[key] = -1 // no expiry by default
 	return es("OK")
 }
 
@@ -69,17 +77,33 @@ func handle(args []string) string {
 	case "DECR":
 		return incrBy(args[1], -1)
 	case "INCRBY":
-		amount, err := strconv.Atoi(args[2])
-		if err != nil {
-			return ee("ERR value is not an integer or out of range")
-		}
-		return incrBy(args[1], amount)
+		amt, err := strconv.Atoi(args[2])
+		if err != nil { return ee("ERR value is not an integer or out of range") }
+		return incrBy(args[1], amt)
 	case "DECRBY":
-		amount, err := strconv.Atoi(args[2])
-		if err != nil {
-			return ee("ERR value is not an integer or out of range")
-		}
-		return incrBy(args[1], -amount)
+		amt, err := strconv.Atoi(args[2])
+		if err != nil { return ee("ERR value is not an integer or out of range") }
+		return incrBy(args[1], -amt)
+	case "EXPIRE":
+		exp, err := strconv.Atoi(args[2])
+		if err != nil { return ee("ERR value is not an integer or out of range") }
+		if _, exists := store[args[1]]; !exists { return ei(0) }
+		expiry[args[1]] = clock + int64(exp*1000)
+		return ei(1)
+	case "TTL":
+		if _, exists := store[args[1]]; !exists { return ei(-2) }
+		if expiry[args[1]] == -1 { return ei(-1) }
+		return ei(int((expiry[args[1]] - clock) / 1000))
+	case "PERSIST":
+		exp, exists := expiry[args[1]]
+    	if !exists || exp == -1 { return ei(0) }
+    	expiry[args[1]] = -1
+   		return ei(1)
+	case "WAIT":
+		// Advance simulated clock by args[1] milliseconds
+		ms, _ := strconv.ParseInt(args[1], 10, 64)
+		clock += ms
+		return es("OK")
 	}
 	return ee(fmt.Sprintf("ERR unknown command '%s'", args[0]))
 }
