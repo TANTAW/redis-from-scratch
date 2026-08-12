@@ -10,6 +10,8 @@ import (
 
 var store = map[string]string{}
 var expiry = map[string]int64{}
+var lists = map[string][]string{}
+var keyType = map[string]string{} // "string" or "list"
 var clock int64 = 0
 
 func isExpired(key string) bool {
@@ -19,9 +21,16 @@ func isExpired(key string) bool {
 
 func checkExpiry(key string) {
 	if isExpired(key) {
-		delete(store, key)
-		delete(expiry, key)
+		delete(store, key); delete(expiry, key)
+		delete(lists, key); delete(keyType, key)
 	}
+}
+
+func wrongType(key, want string) string {
+	if t, ok := keyType[key]; ok && t != want {
+		return ee("WRONGTYPE Operation against a key holding the wrong kind of value")
+	}
+	return ""
 }
 
 func eb(s string, ok bool) string {
@@ -31,14 +40,22 @@ func eb(s string, ok bool) string {
 func es(s string) string { return fmt.Sprintf("+%s\r\n", s) }
 func ee(m string) string { return fmt.Sprintf("-%s\r\n", m) }
 func ei(n int) string    { return fmt.Sprintf(":%d\r\n", n) }
+func ea(items []string) string {
+	r := fmt.Sprintf("*%d\r\n", len(items))
+	for _, it := range items { r += eb(it, true) }
+	return r
+}
 
 func incrBy(key string, delta int) string {
+	checkExpiry(key)
+	if e := wrongType(key, "string"); e != "" { return e }
 	v, ok := store[key]
 	if !ok { v = "0" }
 	n, err := strconv.Atoi(v)
 	if err != nil { return ee("ERR value is not an integer or out of range") }
 	n += delta
 	store[key] = strconv.Itoa(n)
+	keyType[key] = "string"
 	return ei(n)
 }
 
@@ -58,9 +75,13 @@ func setCmd(args []string) string {
 		}
 	}
 	_, exists := store[key]
+	if !exists { _, exists = keyType[key] } // check if any type exists
 	if nx && exists { return eb("", false) }
 	if xx && !exists { return eb("", false) }
+	// SET always overwrites regardless of previous type
+	delete(lists, key)
 	store[key] = val
+	keyType[key] = "string"
 	if exMs >= 0 { expiry[key] = clock + exMs } else { expiry[key] = -1 }
 	return es("OK")
 }
@@ -81,21 +102,15 @@ func handle(args []string) string {
 		return setCmd(args)
 	case "GET":
 		checkExpiry(args[1])
+		if e := wrongType(args[1], "string"); e != "" { return e }
 		v, ok := store[args[1]]
 		return eb(v, ok)
 	case "DBSIZE":
-		count := 0
-		for key := range store {
-			checkExpiry(key)
-			if _, exists := store[key]; exists {
-				count++
-			}
-		}
-		return ei(count)
-	case "INCR":
-		return incrBy(args[1], 1)
-	case "DECR":
-		return incrBy(args[1], -1)
+		cnt := 0
+		for k := range keyType { checkExpiry(k); if _, ok := keyType[k]; ok { cnt++ } }
+		return ei(cnt)
+	case "INCR": return incrBy(args[1], 1)
+	case "DECR": return incrBy(args[1], -1)
 	case "INCRBY":
 		amt, err := strconv.Atoi(args[2])
 		if err != nil { return ee("ERR value is not an integer or out of range") }
@@ -105,24 +120,26 @@ func handle(args []string) string {
 		if err != nil { return ee("ERR value is not an integer or out of range") }
 		return incrBy(args[1], -amt)
 	case "EXPIRE":
-		if _, ok := store[args[1]]; !ok { return ei(0) }
+		checkExpiry(args[1])
+		if _, ok := keyType[args[1]]; !ok { return ei(0) }
 		secs, _ := strconv.ParseInt(args[2], 10, 64)
 		expiry[args[1]] = clock + secs*1000
 		return ei(1)
 	case "TTL":
 		checkExpiry(args[1])
-		if _, ok := store[args[1]]; !ok { return ei(-2) }
+		if _, ok := keyType[args[1]]; !ok { return ei(-2) }
 		exp := expiry[args[1]]
 		if exp < 0 { return ei(-1) }
 		return ei(int((exp - clock) / 1000))
 	case "PTTL":
-		checkExpiry(args[1])	
-		if _, ok := store[args[1]]; !ok { return ei(-2) }
+		checkExpiry(args[1])
+		if _, ok := keyType[args[1]]; !ok { return ei(-2) }
 		exp := expiry[args[1]]
 		if exp < 0 { return ei(-1) }
 		return ei(int(exp - clock))
 	case "PERSIST":
-		if _, ok := store[args[1]]; !ok { return ei(0) }
+		checkExpiry(args[1])
+		if _, ok := keyType[args[1]]; !ok { return ei(0) }
 		exp := expiry[args[1]]
 		if exp < 0 { return ei(0) }
 		expiry[args[1]] = -1
@@ -131,10 +148,43 @@ func handle(args []string) string {
 		ms, _ := strconv.ParseInt(args[1], 10, 64)
 		clock += ms
 		return es("OK")
-	case "EXISTS":
+	case "LPUSH":
 		checkExpiry(args[1])
-		if _, ok := store[args[1]]; !ok { return ei(0) }
-		return ei(1)
+		if e := wrongType(args[1], "list"); e != "" { return e }
+		key := args[1]		
+		for _, val := range args[2:] {
+			if _, ok := lists[key]; !ok { lists[key] = []string{} }
+			lists[key] = append([]string{val}, lists[key]...)
+		}
+		keyType[key] = "list"
+		return ei(len(lists[key]))
+	case "RPUSH":
+		checkExpiry(args[1])
+		if e := wrongType(args[1], "list"); e != "" { return e }
+		key := args[1]
+		if _, ok := lists[key]; !ok { lists[key] = []string{} }	
+		// TODO: Append each value in args[2:] to lists[key]
+		// Create list if doesn't exist. Set keyType[key] = "list"
+		// Return ei(len(lists[key]))
+
+		for _, val := range args[2:] {
+			lists[key] = append(lists[key], val)
+		}
+		keyType[key] = "list"
+		return ei(len(lists[key]))	
+	case "LRANGE":
+		checkExpiry(args[1])
+		key := args[1]
+		if _, ok := lists[key]; !ok { return ea(nil) }
+		start, _ := strconv.Atoi(args[2])
+		stop, _ := strconv.Atoi(args[3])
+		l := lists[key]; ln := len(l)
+		if start < 0 { start = ln + start }
+		if stop < 0 { stop = ln + stop }
+		if start < 0 { start = 0 }
+		if stop >= ln { stop = ln - 1 }
+		if start > stop { return ea(nil) }
+		return ea(l[start : stop+1])
 	}
 	return ee(fmt.Sprintf("ERR unknown command '%s'", args[0]))
 }
