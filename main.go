@@ -9,8 +9,8 @@ import (
 )
 
 var store = map[string]string{}
-var expiry = map[string]int64{} // key -> absolute expiry in ms (-1 = no expiry)
-var clock int64 = 0             // simulated clock in milliseconds
+var expiry = map[string]int64{} // key -> absolute ms (-1 = no expiry)
+var clock int64 = 0
 
 func isExpired(key string) bool {
 	exp, ok := expiry[key]
@@ -39,17 +39,28 @@ func setCmd(args []string) string {
 	if len(args) < 3 { return ee("ERR wrong number of arguments for 'SET' command") }
 	key, val := args[1], args[2]
 	nx, xx := false, false
+	exMs := int64(-1)
 	for i := 3; i < len(args); i++ {
 		switch strings.ToUpper(args[i]) {
 		case "NX": nx = true
 		case "XX": xx = true
+		case "EX":
+			exms, _ := strconv.ParseInt(args[i+1], 10, 64)
+			exMs = exms * 1000
+		case "PX":
+			pxms, _ := strconv.ParseInt(args[i+1], 10, 64)
+			exMs = pxms
 		}
 	}
 	_, exists := store[key]
 	if nx && exists { return eb("", false) }
 	if xx && !exists { return eb("", false) }
 	store[key] = val
-	expiry[key] = -1 // no expiry by default
+	if exMs >= 0 {
+		expiry[key] = clock + exMs
+	} else {
+		expiry[key] = -1
+	}
 	return es("OK")
 }
 
@@ -85,22 +96,28 @@ func handle(args []string) string {
 		if err != nil { return ee("ERR value is not an integer or out of range") }
 		return incrBy(args[1], -amt)
 	case "EXPIRE":
-		exp, err := strconv.Atoi(args[2])
-		if err != nil { return ee("ERR value is not an integer or out of range") }
-		if _, exists := store[args[1]]; !exists { return ei(0) }
-		expiry[args[1]] = clock + int64(exp*1000)
+		if _, ok := store[args[1]]; !ok { return ei(0) }
+		secs, _ := strconv.ParseInt(args[2], 10, 64)
+		expiry[args[1]] = clock + secs*1000
 		return ei(1)
 	case "TTL":
-		if _, exists := store[args[1]]; !exists { return ei(-2) }
-		if expiry[args[1]] == -1 { return ei(-1) }
-		return ei(int((expiry[args[1]] - clock) / 1000))
+		if _, ok := store[args[1]]; !ok { return ei(-2) }
+		exp := expiry[args[1]]
+		if exp < 0 { return ei(-1) }
+		return ei(int((exp - clock) / 1000))
 	case "PERSIST":
-		exp, exists := expiry[args[1]]
-    	if !exists || exp == -1 { return ei(0) }
-    	expiry[args[1]] = -1
-   		return ei(1)
+		if _, ok := store[args[1]]; !ok { return ei(0) }
+		exp := expiry[args[1]]
+		if exp < 0 { return ei(0) }
+		expiry[args[1]] = -1
+		return ei(1)
+	case "PTTL":
+		if _, ok := store[args[1]]; !ok { return ei(-2) }
+		exp := expiry[args[1]]
+		if exp < 0 { return ei(-1) }
+		return ei(int((exp - clock)))
+	
 	case "WAIT":
-		// Advance simulated clock by args[1] milliseconds
 		ms, _ := strconv.ParseInt(args[1], 10, 64)
 		clock += ms
 		return es("OK")
