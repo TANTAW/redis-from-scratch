@@ -9,12 +9,19 @@ import (
 )
 
 var store = map[string]string{}
-var expiry = map[string]int64{} // key -> absolute ms (-1 = no expiry)
+var expiry = map[string]int64{}
 var clock int64 = 0
 
 func isExpired(key string) bool {
 	exp, ok := expiry[key]
 	return ok && exp >= 0 && clock >= exp
+}
+
+func checkExpiry(key string) {
+	if isExpired(key) {
+		delete(store, key)
+		delete(expiry, key)
+	}
 }
 
 func eb(s string, ok bool) string {
@@ -45,22 +52,16 @@ func setCmd(args []string) string {
 		case "NX": nx = true
 		case "XX": xx = true
 		case "EX":
-			exms, _ := strconv.ParseInt(args[i+1], 10, 64)
-			exMs = exms * 1000
+			i++; secs, _ := strconv.ParseInt(args[i], 10, 64); exMs = secs * 1000
 		case "PX":
-			pxms, _ := strconv.ParseInt(args[i+1], 10, 64)
-			exMs = pxms
+			i++; ms, _ := strconv.ParseInt(args[i], 10, 64); exMs = ms
 		}
 	}
 	_, exists := store[key]
 	if nx && exists { return eb("", false) }
 	if xx && !exists { return eb("", false) }
 	store[key] = val
-	if exMs >= 0 {
-		expiry[key] = clock + exMs
-	} else {
-		expiry[key] = -1
-	}
+	if exMs >= 0 { expiry[key] = clock + exMs } else { expiry[key] = -1 }
 	return es("OK")
 }
 
@@ -79,10 +80,18 @@ func handle(args []string) string {
 	case "SET":
 		return setCmd(args)
 	case "GET":
+		checkExpiry(args[1])
 		v, ok := store[args[1]]
 		return eb(v, ok)
 	case "DBSIZE":
-		return ei(len(store))
+		count := 0
+		for key := range store {
+			checkExpiry(key)
+			if _, exists := store[key]; exists {
+				count++
+			}
+		}
+		return ei(count)
 	case "INCR":
 		return incrBy(args[1], 1)
 	case "DECR":
@@ -101,26 +110,31 @@ func handle(args []string) string {
 		expiry[args[1]] = clock + secs*1000
 		return ei(1)
 	case "TTL":
+		checkExpiry(args[1])
 		if _, ok := store[args[1]]; !ok { return ei(-2) }
 		exp := expiry[args[1]]
 		if exp < 0 { return ei(-1) }
 		return ei(int((exp - clock) / 1000))
+	case "PTTL":
+		checkExpiry(args[1])	
+		if _, ok := store[args[1]]; !ok { return ei(-2) }
+		exp := expiry[args[1]]
+		if exp < 0 { return ei(-1) }
+		return ei(int(exp - clock))
 	case "PERSIST":
 		if _, ok := store[args[1]]; !ok { return ei(0) }
 		exp := expiry[args[1]]
 		if exp < 0 { return ei(0) }
 		expiry[args[1]] = -1
 		return ei(1)
-	case "PTTL":
-		if _, ok := store[args[1]]; !ok { return ei(-2) }
-		exp := expiry[args[1]]
-		if exp < 0 { return ei(-1) }
-		return ei(int((exp - clock)))
-	
 	case "WAIT":
 		ms, _ := strconv.ParseInt(args[1], 10, 64)
 		clock += ms
 		return es("OK")
+	case "EXISTS":
+		checkExpiry(args[1])
+		if _, ok := store[args[1]]; !ok { return ei(0) }
+		return ei(1)
 	}
 	return ee(fmt.Sprintf("ERR unknown command '%s'", args[0]))
 }
