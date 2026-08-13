@@ -105,6 +105,13 @@ func handle(args []string) string {
 		if e := wrongType(args[1], "string"); e != "" { return e }
 		v, ok := store[args[1]]
 		return eb(v, ok)
+	case "EXISTS":
+		cnt := 0
+        for _, k := range args[1:] {
+        checkExpiry(k)
+        if _, ok := keyType[k]; ok { cnt++ }
+        }
+    	return ei(cnt)	
 	case "DBSIZE":
 		cnt := 0
 		for k := range keyType { checkExpiry(k); if _, ok := keyType[k]; ok { cnt++ } }
