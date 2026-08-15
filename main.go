@@ -11,27 +11,26 @@ import (
 var store = map[string]string{}
 var expiry = map[string]int64{}
 var lists = map[string][]string{}
-var keyType = map[string]string{} // "string" or "list"
+var keyType = map[string]string{}
 var clock int64 = 0
 
 func isExpired(key string) bool {
 	exp, ok := expiry[key]
 	return ok && exp >= 0 && clock >= exp
 }
-
 func checkExpiry(key string) {
-	if isExpired(key) {
-		delete(store, key); delete(expiry, key)
-		delete(lists, key); delete(keyType, key)
-	}
+	if isExpired(key) { delete(store, key); delete(expiry, key); delete(lists, key); delete(keyType, key) }
 }
-
 func wrongType(key, want string) string {
-	if t, ok := keyType[key]; ok && t != want {
-		return ee("WRONGTYPE Operation against a key holding the wrong kind of value")
-	}
+	if t, ok := keyType[key]; ok && t != want { return ee("WRONGTYPE Operation against a key holding the wrong kind of value") }
 	return ""
 }
+
+func cleanupKey(key string) {
+	delete(lists, key)
+	delete(keyType, key)
+	delete(expiry, key)
+}	
 
 func eb(s string, ok bool) string {
 	if !ok { return "$-1\r\n" }
@@ -68,20 +67,15 @@ func setCmd(args []string) string {
 		switch strings.ToUpper(args[i]) {
 		case "NX": nx = true
 		case "XX": xx = true
-		case "EX":
-			i++; secs, _ := strconv.ParseInt(args[i], 10, 64); exMs = secs * 1000
-		case "PX":
-			i++; ms, _ := strconv.ParseInt(args[i], 10, 64); exMs = ms
+		case "EX": i++; s, _ := strconv.ParseInt(args[i], 10, 64); exMs = s * 1000
+		case "PX": i++; ms, _ := strconv.ParseInt(args[i], 10, 64); exMs = ms
 		}
 	}
-	_, exists := store[key]
-	if !exists { _, exists = keyType[key] } // check if any type exists
+	_, exists := keyType[key]
 	if nx && exists { return eb("", false) }
 	if xx && !exists { return eb("", false) }
-	// SET always overwrites regardless of previous type
 	delete(lists, key)
-	store[key] = val
-	keyType[key] = "string"
+	store[key] = val; keyType[key] = "string"
 	if exMs >= 0 { expiry[key] = clock + exMs } else { expiry[key] = -1 }
 	return es("OK")
 }
@@ -96,22 +90,19 @@ func handle(args []string) string {
 	case "ECHO":
 		if len(args) != 2 { return ee("ERR wrong number of arguments for 'ECHO' command") }
 		return eb(args[1], true)
-	case "COMMAND":
-		return es("OK")
-	case "SET":
-		return setCmd(args)
+	case "COMMAND": return es("OK")
+	case "SET": return setCmd(args)
 	case "GET":
 		checkExpiry(args[1])
 		if e := wrongType(args[1], "string"); e != "" { return e }
-		v, ok := store[args[1]]
-		return eb(v, ok)
+		v, ok := store[args[1]]; return eb(v, ok)
 	case "EXISTS":
 		cnt := 0
         for _, k := range args[1:] {
         checkExpiry(k)
         if _, ok := keyType[k]; ok { cnt++ }
         }
-    	return ei(cnt)	
+    	return ei(cnt)
 	case "DBSIZE":
 		cnt := 0
 		for k := range keyType { checkExpiry(k); if _, ok := keyType[k]; ok { cnt++ } }
@@ -130,8 +121,7 @@ func handle(args []string) string {
 		checkExpiry(args[1])
 		if _, ok := keyType[args[1]]; !ok { return ei(0) }
 		secs, _ := strconv.ParseInt(args[2], 10, 64)
-		expiry[args[1]] = clock + secs*1000
-		return ei(1)
+		expiry[args[1]] = clock + secs*1000; return ei(1)
 	case "TTL":
 		checkExpiry(args[1])
 		if _, ok := keyType[args[1]]; !ok { return ei(-2) }
@@ -149,47 +139,56 @@ func handle(args []string) string {
 		if _, ok := keyType[args[1]]; !ok { return ei(0) }
 		exp := expiry[args[1]]
 		if exp < 0 { return ei(0) }
-		expiry[args[1]] = -1
-		return ei(1)
+		expiry[args[1]] = -1; return ei(1)
 	case "WAIT":
-		ms, _ := strconv.ParseInt(args[1], 10, 64)
-		clock += ms
-		return es("OK")
+		ms, _ := strconv.ParseInt(args[1], 10, 64); clock += ms; return es("OK")
 	case "LPUSH":
 		checkExpiry(args[1])
 		if e := wrongType(args[1], "list"); e != "" { return e }
-		key := args[1]		
-		for _, val := range args[2:] {
-			if _, ok := lists[key]; !ok { lists[key] = []string{} }
-			lists[key] = append([]string{val}, lists[key]...)
-		}
-		keyType[key] = "list"
+		key := args[1]
+		if _, ok := lists[key]; !ok { lists[key] = nil; keyType[key] = "list" }
+		for _, v := range args[2:] { lists[key] = append([]string{v}, lists[key]...) }
 		return ei(len(lists[key]))
 	case "RPUSH":
 		checkExpiry(args[1])
 		if e := wrongType(args[1], "list"); e != "" { return e }
 		key := args[1]
-		if _, ok := lists[key]; !ok { lists[key] = []string{} }	
-		// TODO: Append each value in args[2:] to lists[key]
-		// Create list if doesn't exist. Set keyType[key] = "list"
-		// Return ei(len(lists[key]))
+		if _, ok := lists[key]; !ok { lists[key] = nil; keyType[key] = "list" }
+		lists[key] = append(lists[key], args[2:]...)
+		return ei(len(lists[key]))
+	case "LPOP":
+		checkExpiry(args[1])
+		key := args[1]
+		l, ok := lists[key]
+		if !ok || len(l) == 0 { return eb("", false) }
+		val := l[0]
+		lists[key] = l[1:]
+		if len(lists[key]) == 0 { cleanupKey(key)}
+		return eb(val, true)
 
-		for _, val := range args[2:] {
-			lists[key] = append(lists[key], val)
-		}
-		keyType[key] = "list"
-		return ei(len(lists[key]))	
+	case "RPOP":
+		checkExpiry(args[1])
+		key := args[1]
+		l, ok := lists[key]
+		if !ok || len(l) == 0 { return eb("", false) }
+		val := l[len(l)-1]
+		lists[key] = l[:len(l)-1]
+		if len(lists[key]) == 0 { cleanupKey(key)}
+		return eb(val, true)		
+	
+	case "LLEN":
+		checkExpiry(args[1])
+		key := args[1]
+		if _, ok := lists[key]; !ok { return ei(0) }
+		return ei(len(lists[key]))
 	case "LRANGE":
 		checkExpiry(args[1])
 		key := args[1]
 		if _, ok := lists[key]; !ok { return ea(nil) }
-		start, _ := strconv.Atoi(args[2])
-		stop, _ := strconv.Atoi(args[3])
+		start, _ := strconv.Atoi(args[2]); stop, _ := strconv.Atoi(args[3])
 		l := lists[key]; ln := len(l)
-		if start < 0 { start = ln + start }
-		if stop < 0 { stop = ln + stop }
-		if start < 0 { start = 0 }
-		if stop >= ln { stop = ln - 1 }
+		if start < 0 { start = ln + start }; if stop < 0 { stop = ln + stop }
+		if start < 0 { start = 0 }; if stop >= ln { stop = ln - 1 }
 		if start > stop { return ea(nil) }
 		return ea(l[start : stop+1])
 	}
