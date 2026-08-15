@@ -11,6 +11,7 @@ import (
 var store = map[string]string{}
 var expiry = map[string]int64{}
 var lists = map[string][]string{}
+var hashes = map[string]map[string]string{}
 var keyType = map[string]string{}
 var clock int64 = 0
 
@@ -19,18 +20,17 @@ func isExpired(key string) bool {
 	return ok && exp >= 0 && clock >= exp
 }
 func checkExpiry(key string) {
-	if isExpired(key) { delete(store, key); delete(expiry, key); delete(lists, key); delete(keyType, key) }
+	if isExpired(key) { delete(store, key); delete(expiry, key); delete(lists, key); delete(hashes, key); delete(keyType, key) }
 }
 func wrongType(key, want string) string {
 	if t, ok := keyType[key]; ok && t != want { return ee("WRONGTYPE Operation against a key holding the wrong kind of value") }
 	return ""
 }
 
-func cleanupKey(key string) {
-	delete(lists, key)
-	delete(keyType, key)
-	delete(expiry, key)
-}	
+func cleanupEmpty(key string) {
+	if l, ok := lists[key]; ok && len(l) == 0 { delete(lists, key); delete(keyType, key); delete(expiry, key) }
+	if h, ok := hashes[key]; ok && len(h) == 0 { delete(hashes, key); delete(keyType, key); delete(expiry, key) }
+}
 
 func eb(s string, ok bool) string {
 	if !ok { return "$-1\r\n" }
@@ -163,7 +163,7 @@ func handle(args []string) string {
 		if !ok || len(l) == 0 { return eb("", false) }
 		val := l[0]
 		lists[key] = l[1:]
-		if len(lists[key]) == 0 { cleanupKey(key)}
+		if len(lists[key]) == 0 { cleanupEmpty(key) }
 		return eb(val, true)
 
 	case "RPOP":
@@ -173,7 +173,7 @@ func handle(args []string) string {
 		if !ok || len(l) == 0 { return eb("", false) }
 		val := l[len(l)-1]
 		lists[key] = l[:len(l)-1]
-		if len(lists[key]) == 0 { cleanupKey(key)}
+		if len(lists[key]) == 0 { cleanupEmpty(key) }
 		return eb(val, true)		
 	
 	case "LLEN":
@@ -191,6 +191,29 @@ func handle(args []string) string {
 		if start < 0 { start = 0 }; if stop >= ln { stop = ln - 1 }
 		if start > stop { return ea(nil) }
 		return ea(l[start : stop+1])
+	case "HSET":
+		checkExpiry(args[1]); if e := wrongType(args[1], "hash"); e != "" { return e }
+		key := args[1]
+		h, ok := hashes[key]
+		if !ok { h = map[string]string{}; hashes[key] = h; keyType[key] = "hash" }
+		newCount := 0
+		for i := 2; i < len(args); i += 2 {
+			field, value := args[i], args[i+1]
+			if _, exists := h[field]; !exists { newCount++ }
+			h[field] = value
+		}
+		return ei(newCount)
+	case "HGET":
+		checkExpiry(args[1]); if e := wrongType(args[1], "hash"); e != "" { return e }
+		var key = args[1]	
+		var field = args[2]
+		if h, ok := hashes[key]; ok {
+			if val, exists := h[field]; exists {
+				return eb(val, true)
+			}
+		}
+		return eb("", false)
+		
 	}
 	return ee(fmt.Sprintf("ERR unknown command '%s'", args[0]))
 }
