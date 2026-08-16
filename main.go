@@ -213,7 +213,44 @@ func handle(args []string) string {
 			}
 		}
 		return eb("", false)
-		
+	
+	case "HDEL":
+		checkExpiry(args[1]); if e := wrongType(args[1], "hash"); e != "" { return e }
+		hash, ok := hashes[args[1]]
+		if !ok { return ei(0) }
+		count := 0
+		for _, field := range args[2:] {
+			if _, exists := hash[field]; exists {
+				delete(hash, field)
+				count++
+			}
+		}
+		cleanupEmpty(args[1])
+		return ei(count)
+	case "HGETALL":
+		checkExpiry(args[1]); if e := wrongType(args[1], "hash"); e != "" { return e }
+		list, ok := hashes[args[1]]
+		if !ok { return ea(nil) }
+		result := make([]string, 0, len(list)*2)
+		for field, value := range list {
+			result = append(result, field, value)
+		}
+		return ea(result)
+	case "HEXISTS":
+		checkExpiry(args[1])
+		hash, ok := hashes[args[1]]
+		if !ok { return ei(0) }
+		if _, exists := hash[args[2]]; exists {
+			return ei(1)
+		}
+		return ei(0)
+	case "HLEN":
+		checkExpiry(args[1])
+		if e := wrongType(args[1], "hash"); e != "" { return e }
+		hash, ok := hashes[args[1]]
+		if !ok { return ei(0) }
+		return ei(len(hash))	
+
 	}
 	return ee(fmt.Sprintf("ERR unknown command '%s'", args[0]))
 }
