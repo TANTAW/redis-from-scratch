@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -12,6 +13,7 @@ var store = map[string]string{}
 var expiry = map[string]int64{}
 var lists = map[string][]string{}
 var hashes = map[string]map[string]string{}
+var sets = map[string]map[string]bool{}
 var keyType = map[string]string{}
 var clock int64 = 0
 
@@ -30,6 +32,11 @@ func wrongType(key, want string) string {
 func cleanupEmpty(key string) {
 	if l, ok := lists[key]; ok && len(l) == 0 { delete(lists, key); delete(keyType, key); delete(expiry, key) }
 	if h, ok := hashes[key]; ok && len(h) == 0 { delete(hashes, key); delete(keyType, key); delete(expiry, key) }
+}
+
+func delKey(key string) {
+	delete(store, key); delete(expiry, key); delete(lists, key)
+	delete(hashes, key); delete(sets, key); delete(keyType, key)
 }
 
 func eb(s string, ok bool) string {
@@ -249,7 +256,57 @@ func handle(args []string) string {
 		if e := wrongType(args[1], "hash"); e != "" { return e }
 		hash, ok := hashes[args[1]]
 		if !ok { return ei(0) }
-		return ei(len(hash))	
+		return ei(len(hash))
+	
+	case "SADD":
+		checkExpiry(args[1]); if e := wrongType(args[1], "set"); e != "" { return e }
+		key := args[1]
+		set, ok := sets[key]
+		if !ok { set = map[string]bool{}; sets[key] = set; keyType[key] = "set" }
+		newCount := 0
+		for _, member := range args[2:] {
+			if !set[member] {
+				set[member] = true
+				newCount++
+			}
+		}
+		return ei(newCount)
+	case "SMEMBERS":
+		checkExpiry(args[1]); if e := wrongType(args[1], "set"); e != "" { return e }
+		set, ok := sets[args[1]]
+		if !ok { return ea(nil) }
+		result := make([]string, 0, len(set))
+		for member := range set {
+			result = append(result, member)
+		}
+		sort.Strings(result)
+		return ea(result)
+	case "SISMEMBER":
+		checkExpiry(args[1])
+		set, ok := sets[args[1]]
+		if !ok { return ei(0) }
+		if _, exists := set[args[2]]; exists {
+			return ei(1)
+		}
+		return ei(0)
+	case "SCARD":
+		checkExpiry(args[1])
+		set, ok := sets[args[1]]
+		if !ok { return ei(0) }
+		return ei(len(set))
+	case "SREM":
+		checkExpiry(args[1]); if e := wrongType(args[1], "set"); e != "" { return e }
+		set, ok := sets[args[1]]
+		if !ok { return ei(0) }
+		count := 0
+		for _, member := range args[2:] {
+			if _, exists := set[member]; exists {
+				delete(set, member)
+				count++
+			}
+		}
+		cleanupEmpty(args[1])
+		return ei(count)
 
 	}
 	return ee(fmt.Sprintf("ERR unknown command '%s'", args[0]))
