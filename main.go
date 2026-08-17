@@ -261,29 +261,22 @@ func handle(args []string) string {
 			}
 		}
 		return ea(result)	
-		// TODO: Sort entries by score (then by member name for ties)
-		// Use start/stop indices from args[2], args[3] (handle negative indices)
-		// If last arg is "WITHSCORES", include scores alternating with members
-		// Return as RESP array
 	case "ZRANK":
 		checkExpiry(args[1])
 		val := args[2]
 		sortedEntries := zsortedEntries(args[1])
 		for i, entry := range sortedEntries {
 			if entry.member == val {
-				return ei(i) // Return 0-based rank
+				return ei(i) 
 			}
 		}
-		return ei(-1) // Member not found	
-		// TODO: Return 0-based rank (position in score-sorted order) as integer
-		// If member not found, return eb("", false)
+		return ei(-1) 
 	case "ZCARD":
 		checkExpiry(args[1])
 		val := args[1]
 		sortedEntries := zsortedEntries(val)
 		return ei(len(sortedEntries))		
 
-		// TODO: Return count of members in sorted set, or ei(0)
 	}
 	return ee(fmt.Sprintf("ERR unknown command '%s'", args[0]))
 }
